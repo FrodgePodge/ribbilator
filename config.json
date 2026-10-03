@@ -2,8 +2,11 @@
   "word": "RIBBIT",
   "start": "2026-10-04",
   "gapColumns": 5,
-  "commitsMin": 18,
-  "commitsMax": 28,
+  "login": "FrodgePodge",
+  "commitsMin": 15,
+  "commitsCap": 400,
+  "headroom": 1.3,
+  "jitter": 0.1,
   "name": "Aemily",
   "email": "336043580+FrodgePodge@users.noreply.github.com"
 }

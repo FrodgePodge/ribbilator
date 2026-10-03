@@ -56,8 +56,29 @@ if ($todayDate -lt $start) { Log "before start date $($cfg.start); nothing to do
 function DoneDates {
     $set = @{}
     $subjects = Repo log --format=%s --grep='^rib ' 2>$null
-    foreach ($s in $subjects) { if ($s -match '^rib (\d{4}-\d{2}-\d{2}) ') { $set[$Matches[1]] = $true } }
-    return $set
+    foreach ($s in $subjects) { if ($s -match '^rib (\d{4}-\d{2}-\d{2}) \d+/(\d+)$') { $set[$Matches[1]] = [int]$Matches[2] } }
+    return $set    # date -> how many commits that day's cluster has
+}
+
+# the busiest day on the profile that is NOT ribbilator's own work, read from the public contributions page.
+# github shades the graph relative to the busiest day, so the lit pixels must beat this to stay the darkest green.
+function RealMax($ribByDate) {
+    try {
+        $h = (Invoke-WebRequest "https://github.com/users/$($cfg.login)/contributions" -UseBasicParsing -TimeoutSec 20 -Headers @{ 'User-Agent' = 'ribbilator' }).Content
+    } catch { return $null }
+    $dates = @{}
+    foreach ($m in [regex]::Matches($h, 'data-date="(\d{4}-\d{2}-\d{2})" id="(contribution-day-component-\d+-\d+)"')) { $dates[$m.Groups[2].Value] = $m.Groups[1].Value }
+    if ($dates.Count -eq 0) { return $null }
+    $max = 0
+    foreach ($m in [regex]::Matches($h, 'for="(contribution-day-component-\d+-\d+)"[^>]*>\s*(No|\d+) contribution')) {
+        if (-not $dates.ContainsKey($m.Groups[1].Value)) { continue }
+        $total = if ($m.Groups[2].Value -eq 'No') { 0 } else { [int]$m.Groups[2].Value }
+        $date = $dates[$m.Groups[1].Value]
+        $rib = if ($ribByDate.ContainsKey($date)) { $ribByDate[$date] } else { 0 }
+        $real = $total - $rib
+        if ($real -gt $max) { $max = $real }
+    }
+    return $max
 }
 function PendingDays {
     $done = DoneDates
@@ -85,9 +106,22 @@ if ($remoteHasMain) {
     if (-not $pending) { Log 'the other machine already did it'; return }
 }
 
+# auto-tune the cluster size: beat the busiest real day by `headroom`, never below commitsMin or above commitsCap
+$tuneFile = Join-Path $root 'tuning.json'
+$realMax = RealMax (DoneDates)
+if ($null -ne $realMax) {
+    @{ realMax = $realMax; checked = (Get-Date -Format 's') } | ConvertTo-Json | Set-Content $tuneFile
+} elseif (Test-Path $tuneFile) {
+    $realMax = (Get-Content $tuneFile -Raw | ConvertFrom-Json).realMax
+    Log "could not read the profile; using the last known busiest real day ($realMax)"
+} else { $realMax = 0 }
+$target = [int][math]::Min($cfg.commitsCap, [math]::Max($cfg.commitsMin, [math]::Ceiling($realMax * $cfg.headroom)))
+$spread = [int][math]::Ceiling($target * $cfg.jitter)
+Log "tuning: busiest real day $realMax -> $target to $($target + $spread) commits per lit day"
+
 foreach ($d in $pending) {
     $key = $d.ToString('yyyy-MM-dd')
-    $n = Get-Random -Minimum $cfg.commitsMin -Maximum ($cfg.commitsMax + 1)
+    $n = [int](Get-Random -Minimum $target -Maximum ($target + $spread + 1))
     for ($i = 1; $i -le $n; $i++) {
         # noon utc on the day itself, so every timezone reading agrees on which day this is
         $stamp = ([datetime]::SpecifyKind($d.AddHours(12).AddSeconds($i), 'Utc')).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
