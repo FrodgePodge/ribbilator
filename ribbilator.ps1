@@ -61,23 +61,31 @@ function DoneDates {
     return $set    # date -> how many rib commits that day has (counted, so a doubled day is still subtracted right)
 }
 
-# the busiest day on the profile that is NOT ribbilator's own work, read from the public contributions page.
-# github shades the graph relative to the busiest day, so the lit pixels must beat this to stay the darkest green.
-function RealMax($ribByDate) {
+# each day's contributions that are NOT ribbilator's own work, read from the public contributions page.
+# returns date -> real count, or $null if the page can't be read.
+function RealByDate($ribByDate) {
     try {
         $h = (Invoke-WebRequest "https://github.com/users/$($cfg.login)/contributions" -UseBasicParsing -TimeoutSec 20 -Headers @{ 'User-Agent' = 'ribbilator' }).Content
     } catch { return $null }
     $dates = @{}
     foreach ($m in [regex]::Matches($h, 'data-date="(\d{4}-\d{2}-\d{2})" id="(contribution-day-component-\d+-\d+)"')) { $dates[$m.Groups[2].Value] = $m.Groups[1].Value }
     if ($dates.Count -eq 0) { return $null }
-    $max = 0
+    $real = @{}
     foreach ($m in [regex]::Matches($h, 'for="(contribution-day-component-\d+-\d+)"[^>]*>\s*(No|\d+) contribution')) {
         if (-not $dates.ContainsKey($m.Groups[1].Value)) { continue }
         $total = if ($m.Groups[2].Value -eq 'No') { 0 } else { [int]$m.Groups[2].Value }
         $date = $dates[$m.Groups[1].Value]
         $rib = if ($ribByDate.ContainsKey($date)) { $ribByDate[$date] } else { 0 }
-        $real = $total - $rib
-        if ($real -gt $max) { $max = $real }
+        $real[$date] = [math]::Max(0, $total - $rib)
+    }
+    return $real
+}
+# the busiest real day within `window` days either side of $d: a lit cell only has to stand out from its neighbours
+function LocalMax($real, [datetime]$d) {
+    $max = 0
+    for ($o = -$cfg.window; $o -le $cfg.window; $o++) {
+        $v = [int]$real[$d.AddDays($o).ToString('yyyy-MM-dd')]
+        if ($v -gt $max) { $max = $v }
     }
     return $max
 }
@@ -111,22 +119,24 @@ if ($remoteHasMain) {
 }
 
 if ($pending) {
-    # auto-tune the cluster size: beat the busiest real day by `headroom`, never below commitsMin or above commitsCap
+    # cluster size per lit day: beat the busiest real day nearby by `headroom` (never below commitsMin),
+    # then a random lift of up to `depth` times that again, so the letters have shading rather than one flat green
     $tuneFile = Join-Path $root 'tuning.json'
-    $realMax = RealMax (DoneDates)
-    if ($null -ne $realMax) {
-        @{ realMax = $realMax; checked = (Get-Date -Format 's') } | ConvertTo-Json | Set-Content $tuneFile
+    $real = RealByDate (DoneDates)
+    if ($null -ne $real) {
+        @{ real = $real; checked = (Get-Date -Format 's') } | ConvertTo-Json | Set-Content $tuneFile
     } elseif (Test-Path $tuneFile) {
-        $realMax = (Get-Content $tuneFile -Raw | ConvertFrom-Json).realMax
-        Log "could not read the profile; using the last known busiest real day ($realMax)"
-    } else { $realMax = 0 }
-    $target = [int][math]::Min($cfg.commitsCap, [math]::Max($cfg.commitsMin, [math]::Ceiling($realMax * $cfg.headroom)))
-    $spread = [int][math]::Ceiling($target * $cfg.jitter)
-    Log "tuning: busiest real day $realMax -> $target to $($target + $spread) commits per lit day"
+        $real = @{}
+        $saved = (Get-Content $tuneFile -Raw | ConvertFrom-Json).real
+        if ($saved) { foreach ($p in $saved.PSObject.Properties) { $real[$p.Name] = [int]$p.Value } }
+        Log "could not read the profile; using the last known real counts"
+    } else { $real = @{} }
 
     foreach ($d in $pending) {
         $key = $d.ToString('yyyy-MM-dd')
-        $n = [int](Get-Random -Minimum $target -Maximum ($target + $spread + 1))
+        $local = LocalMax $real $d
+        $base = [math]::Max($cfg.commitsMin, [math]::Ceiling($local * $cfg.headroom))
+        $n = [int][math]::Min($cfg.commitsCap, [math]::Round($base * (1 + $cfg.depth * (Get-Random -Minimum 0.0 -Maximum 1.0))))
         for ($i = 1; $i -le $n; $i++) {
             # noon utc on the day itself, so every timezone reading agrees on which day this is
             $stamp = ([datetime]::SpecifyKind($d.AddHours(12).AddSeconds($i), 'Utc')).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -134,7 +144,7 @@ if ($pending) {
             Repo -c "user.name=$($cfg.name)" -c "user.email=$($cfg.email)" commit --allow-empty -q -m "rib $key $i/$n"
         }
         Remove-Item Env:GIT_AUTHOR_DATE, Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
-        Log "committed $n for $key"
+        Log "committed $n for $key (busiest real day nearby: $local)"
     }
 }
 
