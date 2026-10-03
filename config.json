@@ -5,8 +5,9 @@
   "login": "FrodgePodge",
   "commitsMin": 15,
   "commitsCap": 400,
-  "headroom": 1.3,
-  "jitter": 0.1,
+  "window": 21,
+  "headroom": 2,
+  "depth": 1.5,
   "name": "Aemily",
   "email": "336043580+FrodgePodge@users.noreply.github.com"
 }
