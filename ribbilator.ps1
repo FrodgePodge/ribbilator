@@ -14,7 +14,8 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $logFile = Join-Path $root 'ribbilator.log'
 function Log($m) { $line = "$(Get-Date -Format 's') $m"; Add-Content $logFile $line; Write-Host $line }
-function Repo { & git.exe -C $root @args }
+# 'Continue' here: under 'Stop', windows powershell turns any git stderr line into a crash, even with 2>$null
+function Repo { $ErrorActionPreference = 'Continue'; & git.exe -C $root @args }
 
 $cfg = Get-Content (Join-Path $root 'config.json') -Raw | ConvertFrom-Json
 $start = [datetime]::ParseExact($cfg.start, 'yyyy-MM-dd', $null)   # must be a sunday
@@ -56,8 +57,8 @@ if ($todayDate -lt $start) { Log "before start date $($cfg.start); nothing to do
 function DoneDates {
     $set = @{}
     $subjects = Repo log --format=%s --grep='^rib ' 2>$null
-    foreach ($s in $subjects) { if ($s -match '^rib (\d{4}-\d{2}-\d{2}) \d+/(\d+)$') { $set[$Matches[1]] = [int]$Matches[2] } }
-    return $set    # date -> how many commits that day's cluster has
+    foreach ($s in $subjects) { if ($s -match '^rib (\d{4}-\d{2}-\d{2}) \d+/\d+$') { $set[$Matches[1]] = 1 + [int]$set[$Matches[1]] } }
+    return $set    # date -> how many rib commits that day has (counted, so a doubled day is still subtracted right)
 }
 
 # the busiest day on the profile that is NOT ribbilator's own work, read from the public contributions page.
@@ -90,10 +91,13 @@ function PendingDays {
     return $out
 }
 
-$pending = PendingDays
-if (-not $pending) { Log 'nothing to do (today is dark, or already done)'; return }
+function Unpushed { [int](Repo rev-list --count origin/main..main 2>$null) }   # no network: compares with the last fetch
 
-if ($DryRun) { Log "dry run: would commit for $($pending.Count) day(s): $(($pending | ForEach-Object { $_.ToString('yyyy-MM-dd') }) -join ', ')"; return }
+$pending = PendingDays
+$unpushed = Unpushed
+if (-not $pending -and -not $unpushed) { Log 'nothing to do (today is dark, or already done)'; return }
+
+if ($DryRun) { Log "dry run: would commit for $(@($pending).Count) day(s): $(($pending | ForEach-Object { $_.ToString('yyyy-MM-dd') }) -join ', '); $unpushed commit(s) waiting to push"; return }
 
 # something is pending: sync with the remote first, so a push from the other machine is seen
 $null = Repo fetch origin -q 2>$null
@@ -103,33 +107,35 @@ if ($remoteHasMain) {
     $null = Repo pull --rebase --autostash -q origin main 2>$null
     if ($LASTEXITCODE -ne 0) { Log 'pull failed; will retry next run'; return }
     $pending = PendingDays
-    if (-not $pending) { Log 'the other machine already did it'; return }
+    if (-not $pending -and -not (Unpushed)) { Log 'the other machine already did it'; return }
 }
 
-# auto-tune the cluster size: beat the busiest real day by `headroom`, never below commitsMin or above commitsCap
-$tuneFile = Join-Path $root 'tuning.json'
-$realMax = RealMax (DoneDates)
-if ($null -ne $realMax) {
-    @{ realMax = $realMax; checked = (Get-Date -Format 's') } | ConvertTo-Json | Set-Content $tuneFile
-} elseif (Test-Path $tuneFile) {
-    $realMax = (Get-Content $tuneFile -Raw | ConvertFrom-Json).realMax
-    Log "could not read the profile; using the last known busiest real day ($realMax)"
-} else { $realMax = 0 }
-$target = [int][math]::Min($cfg.commitsCap, [math]::Max($cfg.commitsMin, [math]::Ceiling($realMax * $cfg.headroom)))
-$spread = [int][math]::Ceiling($target * $cfg.jitter)
-Log "tuning: busiest real day $realMax -> $target to $($target + $spread) commits per lit day"
+if ($pending) {
+    # auto-tune the cluster size: beat the busiest real day by `headroom`, never below commitsMin or above commitsCap
+    $tuneFile = Join-Path $root 'tuning.json'
+    $realMax = RealMax (DoneDates)
+    if ($null -ne $realMax) {
+        @{ realMax = $realMax; checked = (Get-Date -Format 's') } | ConvertTo-Json | Set-Content $tuneFile
+    } elseif (Test-Path $tuneFile) {
+        $realMax = (Get-Content $tuneFile -Raw | ConvertFrom-Json).realMax
+        Log "could not read the profile; using the last known busiest real day ($realMax)"
+    } else { $realMax = 0 }
+    $target = [int][math]::Min($cfg.commitsCap, [math]::Max($cfg.commitsMin, [math]::Ceiling($realMax * $cfg.headroom)))
+    $spread = [int][math]::Ceiling($target * $cfg.jitter)
+    Log "tuning: busiest real day $realMax -> $target to $($target + $spread) commits per lit day"
 
-foreach ($d in $pending) {
-    $key = $d.ToString('yyyy-MM-dd')
-    $n = [int](Get-Random -Minimum $target -Maximum ($target + $spread + 1))
-    for ($i = 1; $i -le $n; $i++) {
-        # noon utc on the day itself, so every timezone reading agrees on which day this is
-        $stamp = ([datetime]::SpecifyKind($d.AddHours(12).AddSeconds($i), 'Utc')).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-        $env:GIT_AUTHOR_DATE = $stamp; $env:GIT_COMMITTER_DATE = $stamp
-        Repo -c "user.name=$($cfg.name)" -c "user.email=$($cfg.email)" commit --allow-empty -q -m "rib $key $i/$n"
+    foreach ($d in $pending) {
+        $key = $d.ToString('yyyy-MM-dd')
+        $n = [int](Get-Random -Minimum $target -Maximum ($target + $spread + 1))
+        for ($i = 1; $i -le $n; $i++) {
+            # noon utc on the day itself, so every timezone reading agrees on which day this is
+            $stamp = ([datetime]::SpecifyKind($d.AddHours(12).AddSeconds($i), 'Utc')).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            $env:GIT_AUTHOR_DATE = $stamp; $env:GIT_COMMITTER_DATE = $stamp
+            Repo -c "user.name=$($cfg.name)" -c "user.email=$($cfg.email)" commit --allow-empty -q -m "rib $key $i/$n"
+        }
+        Remove-Item Env:GIT_AUTHOR_DATE, Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+        Log "committed $n for $key"
     }
-    Remove-Item Env:GIT_AUTHOR_DATE, Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
-    Log "committed $n for $key"
 }
 
 $null = Repo push -q origin main 2>$null
