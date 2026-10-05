@@ -21,12 +21,13 @@ $cfg = Get-Content (Join-Path $root 'config.json') -Raw | ConvertFrom-Json
 $start = [datetime]::ParseExact($cfg.start, 'yyyy-MM-dd', $null)   # must be a sunday
 if ($start.DayOfWeek -ne 'Sunday') { throw "start in config.json must be a sunday" }
 
-# 5x7 font, rows top to bottom = sunday to saturday
+# 5x5 font, centred in the 7-row graph: rows top to bottom = monday to friday, sunday and saturday stay dark
+$pad = '.....'
 $font = @{
-    R = '####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'
-    I = '#####', '..#..', '..#..', '..#..', '..#..', '..#..', '#####'
-    B = '####.', '#...#', '#...#', '####.', '#...#', '#...#', '####.'
-    T = '#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'
+    R = $pad, '####.', '#...#', '####.', '#..#.', '#...#', $pad
+    I = $pad, '#####', '..#..', '..#..', '..#..', '#####', $pad
+    B = $pad, '####.', '#...#', '####.', '#...#', '####.', $pad
+    T = $pad, '#####', '..#..', '..#..', '..#..', '..#..', $pad
 }
 # build the ticker: one entry per week-column, each a 7-character string of '#' and '.'
 $cols = @()
